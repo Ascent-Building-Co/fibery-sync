@@ -1,4 +1,4 @@
-package fibery
+package fibsync
 
 import (
 	"errors"

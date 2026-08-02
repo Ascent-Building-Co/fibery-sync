@@ -1,16 +1,16 @@
-# Fibery Integration Helpers
+# fibsync Integration Helpers
 
-This package provides helpers for building Fibery integrations with optional webhooks, OAuth, and synchronization endpoints.
+This package provides helpers for building fibsync integrations with optional webhooks, OAuth, and synchronization endpoints.
 
 ## Usage
 
 ```go
-server := fibery.NewServer(
-	fibery.WithLogger(fibery.SlogAdapter{Logger: slog.Default()}),
-	fibery.WithStrictJSON(true),
+server := fibsync.NewServer(
+	fibsync.WithLogger(fibsync.SlogAdapter{Logger: slog.Default()}),
+	fibsync.WithStrictJSON(true),
 )
 
-if err := fibery.AddIntegration[
+if err := fibsync.AddIntegration[
 	MyValidateResponse,
 	MyAccountFields,
 	MyPage,
@@ -20,7 +20,7 @@ if err := fibery.AddIntegration[
 	MyWebhookNotification,
 	MyResourceParams,
 ](ctx, server, integration,
-	fibery.WithIntegrationID("quickbooks"),
+	fibsync.WithIntegrationID("quickbooks"),
 ); err != nil {
 	log.Fatal(err)
 }
@@ -37,8 +37,8 @@ Use `BuildHTTPServer` to manage shutdown in your application:
 ```go
 srv := server.BuildHTTPServer(
 	":8080",
-	fibery.WithReadTimeout(5*time.Second),
-	fibery.WithWriteTimeout(60*time.Second),
+	fibsync.WithReadTimeout(5*time.Second),
+	fibsync.WithWriteTimeout(60*time.Second),
 )
 
 go func() {
@@ -70,20 +70,20 @@ Order middleware outermost → innermost so cheap rejections happen early and th
 log captures everything (including rejections and the on-wire, compressed byte count):
 
 ```go
-trusted, err := fibery.ParseCIDRs("10.0.0.0/8") // your proxy/ngrok CIDRs
+trusted, err := fibsync.ParseCIDRs("10.0.0.0/8") // your proxy/ngrok CIDRs
 if err != nil {
 	log.Fatal(err)
 }
-allowed, err := fibery.ParseCIDRs(/* Fibery egress CIDRs */)
+allowed, err := fibsync.ParseCIDRs(/* fibsync egress CIDRs */)
 if err != nil {
 	log.Fatal(err)
 }
 
-srv := server.BuildHTTPServer(":8080", fibery.WithServeMiddleware(
-	fibery.RequestLogMiddleware(fibery.RequestLog{Trusted: trusted}),
-	server.IPAllowlistMiddleware(fibery.IPAllowlist{Allowed: allowed, Trusted: trusted}),
-	fibery.RateLimitMiddleware(fibery.RateLimit{RPS: 20, Burst: 40, Trusted: trusted}),
-	fibery.GzipMiddleware(),
+srv := server.BuildHTTPServer(":8080", fibsync.WithServeMiddleware(
+	fibsync.RequestLogMiddleware(fibsync.RequestLog{Trusted: trusted}),
+	server.IPAllowlistMiddleware(fibsync.IPAllowlist{Allowed: allowed, Trusted: trusted}),
+	fibsync.RateLimitMiddleware(fibsync.RateLimit{RPS: 20, Burst: 40, Trusted: trusted}),
+	fibsync.GzipMiddleware(),
 ))
 ```
 
@@ -91,7 +91,7 @@ Use `server.IPAllowlistMiddleware(...)` (the method) rather than the package fun
 it auto-exempts the framework's public paths (webhook relays) so provider-facing
 traffic is not blocked. Call it after registering integrations. To exempt further
 app-specific paths (for example static pages you add with `Server.Handle`), wrap it
-in `SkipWhen`. The bare `fibery.IPAllowlistMiddleware(...)` function is still
+in `SkipWhen`. The bare `fibsync.IPAllowlistMiddleware(...)` function is still
 available when you want no automatic exemptions.
 
 ### Client IP and trusted proxies
@@ -102,7 +102,7 @@ the client IP with `ClientIP(r, trusted)`. Forwarding headers (`X-Forwarded-For`
 the `Trusted` CIDRs; otherwise the raw peer address is used, so a direct client
 cannot spoof its IP.
 
-- Behind a proxy (ngrok, Fibery's infrastructure, a load balancer), you **must**
+- Behind a proxy (ngrok, fibsync's infrastructure, a load balancer), you **must**
   set `Trusted` to the proxy's CIDR — otherwise every request appears to come
   from the proxy and per-IP limiting/filtering collapses to a single address.
 - For local **ngrok** development the agent forwards over loopback, and
@@ -122,33 +122,33 @@ the environment. An illustrative `.env` for a single integration behind ngrok:
 HTTP_RATE_RPS=20
 HTTP_RATE_BURST=40
 HTTP_IP_FILTER_ENABLED=true
-HTTP_IP_ALLOWLIST=18.198.169.41,18.196.77.165,3.124.79.168  # Fibery egress
+HTTP_IP_ALLOWLIST=18.198.169.41,18.196.77.165,3.124.79.168  # fibsync egress
 HTTP_TRUSTED_PROXIES=127.0.0.1/8,::1/128                    # local ngrok agent
 
-# Account gate — shared secret entered in Fibery's auth form
+# Account gate — shared secret entered in fibsync's auth form
 # generate: openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
 INTEGRATION_GATE=<secret>
 ```
 
 The env var names are yours to choose — the framework reads none of them
-directly. Parse the CIDR lists with `fibery.ParseCIDRs` and pass the results to
+directly. Parse the CIDR lists with `fibsync.ParseCIDRs` and pass the results to
 the middleware.
 
 ## Webhook relay
 
-Some providers cannot deliver webhooks straight to Fibery (an unsupported
+Some providers cannot deliver webhooks straight to fibsync (an unsupported
 Content-Type, a single callback URL fronting several endpoints, etc.). Implement
 `IntegrationWithWebhookRelay` and the framework mounts a relay at
 `{prefix}/webhook` that forwards each inbound delivery to a target you resolve
 and mirrors the upstream response back:
 
 ```go
-func (i *MyIntegration) WebhookRelay(ctx context.Context, rawBody []byte, header http.Header) (fibery.RelayTarget, *fibery.IntegrationError) {
-	url, err := i.resolveTarget() // e.g. Fibery's webhooks-svc URL for this app
+func (i *MyIntegration) WebhookRelay(ctx context.Context, rawBody []byte, header http.Header) (fibsync.RelayTarget, *fibsync.IntegrationError) {
+	url, err := i.resolveTarget() // e.g. fibsync's webhooks-svc URL for this app
 	if err != nil {
-		return fibery.RelayTarget{}, fibery.ServiceUnavailable(err.Error())
+		return fibsync.RelayTarget{}, fibsync.ServiceUnavailable(err.Error())
 	}
-	return fibery.RelayTarget{URL: url, ContentType: "application/json"}, nil
+	return fibsync.RelayTarget{URL: url, ContentType: "application/json"}, nil
 }
 ```
 

@@ -1,4 +1,4 @@
-package fibery
+package fibsync
 
 import (
 	"encoding/json"
@@ -213,6 +213,7 @@ type DataField struct {
 	Ignore       bool               `json:"ignore,omitzero"`
 	Description  string             `json:"description,omitzero"`
 	ReadOnly     bool               `json:"readonly,omitzero"`
+	Writable     bool               `json:"writable,omitzero"`
 	FieldType    DataFieldType      `json:"type,omitzero"`
 	FieldSubType DataFieldSubtype   `json:"subType,omitzero"`
 	Format       *DataFieldFormat   `json:"format,omitempty"`
@@ -373,7 +374,7 @@ type SyncMetaRequest[A any] struct {
 	Account   Account[A]     `json:"account"`
 	Filter    map[string]any `json:"filter"`
 	CreatedAt time.Time      `json:"createdAt"`
-	Workspace any            `json:"workspace,omitempty"`
+	Workspace string         `json:"workspace,omitempty"`
 	Space     string         `json:"space,omitempty"`
 	UserID    string         `json:"userId,omitempty"`
 }
