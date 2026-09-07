@@ -29,7 +29,7 @@ type minimalIntegration struct{}
 
 func (minimalIntegration) Init(_ context.Context, _ InitConfig) error { return nil }
 func (minimalIntegration) Config(context.Context) (Config, *IntegrationError) {
-	return Config{ID: "id", Name: "name", Version: "1"}, nil
+	return Config{Name: "name", Version: "1"}, nil
 }
 func (minimalIntegration) Validate(context.Context, ValidateRequest[testAccountFields]) (*testAccountFields, *IntegrationError) {
 	return nil, nil
@@ -54,7 +54,7 @@ func (c *countingIntegration) Init(_ context.Context, _ InitConfig) error {
 }
 
 func (*countingIntegration) Config(context.Context) (Config, *IntegrationError) {
-	return Config{ID: "id", Name: "name", Version: "1"}, nil
+	return Config{Name: "name", Version: "1"}, nil
 }
 
 func (*countingIntegration) Validate(context.Context, ValidateRequest[testAccountFields]) (*testAccountFields, *IntegrationError) {

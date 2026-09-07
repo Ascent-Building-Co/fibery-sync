@@ -29,15 +29,20 @@ type InitConfig struct {
 
 // Config defines the basic structure of the integration app.
 type Config struct {
-	ID             string           `json:"id"`
-	Name           string           `json:"name"`
-	Website        string           `json:"website,omitempty"`
+	Name    string `json:"name"`
+	Website string `json:"website,omitempty"`
+	// Version must be bumped whenever anything else in Config changes: Fibery
+	// caches the app config and re-reads it only on a version bump or re-auth.
+	// The sync config and schema are not cached this way.
 	Version        string           `json:"version"`
 	Description    string           `json:"description"`
 	Authentication []Authentication `json:"authentication"`
 	Sources        []any            `json:"sources"`
 	ResponsibleFor Responsibilities `json:"responsibleFor"`
 	Actions        []Action         `json:"actions"`
+	// Features carries optional app-level feature flags. Jira is the only known
+	// app to set any ({"timezone": true}); effects are unverified.
+	Features map[string]any `json:"features,omitempty"`
 }
 
 // Authentication defines the different authentication methods that are possible for the app. The Description and Fields values are optional.
@@ -108,9 +113,11 @@ const (
 
 // Responsibilities define what services the app provides.
 type Responsibilities struct {
-	Sync          bool  `json:"dataSynchronization,omitempty"`
-	Import        bool  `json:"dataImport,omitempty"`
-	Automations   bool  `json:"automations,omitempty"`
+	Sync        bool `json:"dataSynchronization,omitempty"`
+	Import      bool `json:"dataImport,omitempty"`
+	Automations bool `json:"automations,omitempty"`
+	// DataProviding gates whether Fibery honors per-field DataField.Writable.
+	// Leave nil to omit the key.
 	DataProviding *bool `json:"dataProviding,omitempty"`
 	UserAuth      *bool `json:"userAuthentication,omitempty"`
 }
@@ -122,6 +129,14 @@ type Action struct {
 	Icon        string      `json:"icon,omitempty"`
 	Description string      `json:"description,omitempty"`
 	Args        []ActionArg `json:"args"`
+	// Sync asks Fibery to run a sync once the action completes. Both Jira
+	// actions set {"action": "refresh"}; unverified.
+	Sync *ActionSync `json:"sync,omitempty"`
+}
+
+// ActionSync requests a sync after an Action runs.
+type ActionSync struct {
+	Action string `json:"action"` // "refresh"
 }
 
 type ActionArg struct {
@@ -171,6 +186,36 @@ type SyncConfig struct {
 type SyncConfigType struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Default pre-selects the type in Fibery's sync setup UI.
+	Default bool `json:"default,omitempty"`
+	// VerifyEntitiesExist is set by Jira on its one primary type. It has no
+	// effect a self-hosted connector can observe: it changes neither sync
+	// behavior (full or delta), nor the DataRequest, nor write-back. Exposed for
+	// parity with Jira; do not expect it to do anything.
+	VerifyEntitiesExist bool `json:"verifyEntitiesExist,omitempty"`
+	// Actions declares the write-back actions Fibery may invoke on this type.
+	// Declaring ExecuteUpdate is what makes Fibery POST a user's edit of a
+	// writable field to /api/v1/synchronizer/execute; without it the edit stays
+	// local to Fibery. The declared names are the keys of ExecuteRequest.Action.
+	//
+	// Only ExecuteUpdate is honored; other names are silently ignored.
+	Actions SyncTypeActions `json:"actions,omitempty"`
+}
+
+// SyncTypeActions maps an action name to its options object.
+type SyncTypeActions map[ExecuteActionName]ExecuteActionConfig
+
+// ExecuteActionConfig is the per-action options object, currently always empty.
+type ExecuteActionConfig struct{}
+
+// Updatable declares that Fibery may push edits of this type's writable fields
+// back to the source. Pair it with DataField.Writable on the fields themselves.
+func (t SyncConfigType) Updatable() SyncConfigType {
+	if t.Actions == nil {
+		t.Actions = SyncTypeActions{}
+	}
+	t.Actions[ExecuteUpdate] = ExecuteActionConfig{}
+	return t
 }
 
 type WebhookConfigType string
@@ -209,10 +254,14 @@ const (
 )
 
 type DataField struct {
-	Name         string             `json:"name"`
-	Ignore       bool               `json:"ignore,omitzero"`
-	Description  string             `json:"description,omitzero"`
-	ReadOnly     bool               `json:"readonly,omitzero"`
+	Name        string `json:"name"`
+	Ignore      bool   `json:"ignore,omitzero"`
+	Description string `json:"description,omitzero"`
+	ReadOnly    bool   `json:"readonly,omitzero"`
+	// Writable allows for the field to be overwritten in Fibery. Requires the
+	// app config to set ResponsibleFor.DataProviding. For the edit to reach the
+	// integration, the type's SyncConfigType.Actions must also declare
+	// ExecuteUpdate; otherwise it stays local to Fibery.
 	Writable     bool               `json:"writable,omitzero"`
 	FieldType    DataFieldType      `json:"type,omitzero"`
 	FieldSubType DataFieldSubtype   `json:"subType,omitzero"`
@@ -382,19 +431,28 @@ type SyncMetaRequest[A any] struct {
 type SyncSchema map[string]map[string]DataField
 
 type DataRequest[A, P any] struct {
-	RequestedType     string                          `json:"requestedType"`
-	OperationID       string                          `json:"operationId"`
-	Types             []string                        `json:"types"`
-	Schema            map[string]map[string]DataField `json:"schema"`
-	Filter            map[string]any                  `json:"filter"`
-	Account           Account[A]                      `json:"account"`
-	LastSyncronizedAt time.Time                       `json:"lastSynchronizedAt"`
-	CreatedAt         time.Time                       `json:"createdAt"`
-	Workspace         any                             `json:"workspace,omitempty"`
-	Pagination        P                               `json:"pagination,omitempty"`
+	RequestedType      string                          `json:"requestedType"`
+	OperationID        string                          `json:"operationId"`
+	Types              []string                        `json:"types"`
+	Schema             map[string]map[string]DataField `json:"schema"`
+	Filter             map[string]any                  `json:"filter"`
+	Account            Account[A]                      `json:"account"`
+	LastSynchronizedAt time.Time                       `json:"lastSynchronizedAt"`
+	// LastFullSynchronizedAt is the start of the previous full sync, distinct
+	// from LastSynchronizedAt. Zero on an account's first sync.
+	LastFullSynchronizedAt time.Time `json:"lastFullSynchronizedAt"`
+	// LastSynchronizationCheckpoint is an opaque cursor Fibery echoes back
+	// between syncs. Always null in observation; whether Fibery reads a
+	// checkpoint out of the data response, and under what key, is unverified.
+	LastSynchronizationCheckpoint json.RawMessage `json:"lastSynchronizationCheckpoint,omitempty"`
+	CreatedAt                     time.Time       `json:"createdAt"`
+	Workspace                     any             `json:"workspace,omitempty"`
+	Pagination                    P               `json:"pagination,omitempty"`
 }
 
 type DataResponse[P any] struct {
+	// Items are applied whole. A field absent from an item becomes null rather
+	// than staying unchanged, so never return a partial entity.
 	Items               []map[string]any `json:"items"`
 	Pagination          Pagination[P]    `json:"pagination"`
 	SynchronizationType SyncType         `json:"synchronizationType,omitempty"`

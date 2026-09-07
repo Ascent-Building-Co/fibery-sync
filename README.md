@@ -159,6 +159,91 @@ registered as a public path, so `Server.IPAllowlistMiddleware` exempts it
 automatically — point the provider's callback at `{prefix}/webhook`. Enablement is
 by capability: implementing the interface turns the relay on.
 
+## Writable fields (Fibery → source)
+
+A synced field can be made editable in Fibery, with the edit pushed back to the
+integration. None of this is in Fibery's public docs; the shapes here were
+captured from a live workspace. Three things must line up:
+
+1. **App-level gate** — `ResponsibleFor.DataProviding` set in `Config`.
+2. **Field-level opt-in** — `Writable` on the field's `DataField`.
+3. **Type-level declaration** — the type's `SyncConfigType.Actions` declares
+   `ExecuteUpdate`. Without it the field is editable but the edit never leaves
+   Fibery.
+
+```go
+func (i *Integration) SyncConfig(ctx context.Context, req fibsync.SyncMetaRequest[AccountFields]) (fibsync.SyncConfig, *fibsync.IntegrationError) {
+	return fibsync.SyncConfig{
+		Types: []fibsync.SyncConfigType{
+			{ID: "issue", Name: "Issue", Default: true}.Updatable(),
+			{ID: "status", Name: "Status", Default: true},
+		},
+	}, nil
+}
+```
+
+Implement `IntegrationWithExecute` to receive the edits; the framework mounts
+`{prefix}/api/v1/synchronizer/execute` when you do.
+
+```go
+func (i *Integration) Execute(ctx context.Context, req fibsync.ExecuteRequest[AccountFields]) (fibsync.ExecuteResponse, *fibsync.IntegrationError) {
+	for typeID, entities := range req.Action[fibsync.ExecuteUpdate] {
+		for _, e := range entities {
+			for fieldID, v := range e.Fields {
+				// Relations arrive as {id, name}; scalars are plain values.
+				if ref, ok := fibsync.AsRelation(v); ok {
+					// write ref.ID to the source
+					_ = ref
+					continue
+				}
+				_ = fieldID
+			}
+		}
+		_ = typeID
+	}
+	return fibsync.ExecuteResponse{}, nil
+}
+```
+
+Worth knowing:
+
+- Fibery calls this **once per edit**, and re-reads the sync config immediately
+  beforehand, so changes to `Actions` take effect on the next edit.
+- `Fields` carries **only what changed**, unlike `SyncData` where entities are
+  applied whole.
+- Only `ExecuteUpdate` is honored. `create` and `delete` can be declared but
+  Fibery never sends them — creation and deletion stay source-owned, so use an
+  `Action` that writes to the source and let the entity appear on the next sync.
+- Fibery accepts an empty response. How it reacts to a non-2xx is unverified.
+- `Config` caches on Fibery's side: bump `Version` whenever you change it, or
+  the `DataProviding` change above will not be picked up.
+
+## Account deletion cleanup
+
+Fibery calls `DELETE {prefix}/api/v1/account` when a user deletes an account for
+the integration, so the connector can clean up in the third-party system —
+usually revoking an access token. Implement `IntegrationWithAccountDeletion` and
+the framework mounts the route.
+
+```go
+func (i *Integration) DeleteAccount(ctx context.Context, account fibsync.Account[AccountFields]) *fibsync.IntegrationError {
+	if err := revokeToken(ctx, account.AccountFields.Token); err != nil {
+		// Only block deletion if retrying would help.
+		slog.Warn("token revoke failed", "account", account.ID, "err", err)
+	}
+	return nil
+}
+```
+
+The request body is the account itself rather than an envelope around it, but it
+carries the same fields every other endpoint sees, custom auth fields included,
+so the account gate applies here too.
+
+**A non-2xx response aborts the deletion in Fibery.** Return an error only when
+the caller should retry. If cleanup is permanently impossible — token already
+revoked, remote 404 — log it and return nil, or the user is left unable to
+delete their account.
+
 ## Serving other content
 
 To serve non-integration routes (static pages, health checks) on the same server

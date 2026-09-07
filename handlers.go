@@ -431,6 +431,49 @@ func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, We
 	}
 }
 
+func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, WebhookHeaders, WebhookNotification, ResourceParams, Oauth1Extra, Oauth2Extra]) handleExecute(execute IntegrationWithExecute[AccountFields]) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req ExecuteRequest[AccountFields]
+		if !i.decode(w, r, &req) {
+			return
+		}
+		if !i.authorize(w, req.Account) {
+			return
+		}
+
+		resp, err := execute.Execute(r.Context(), req)
+		if err != nil {
+			respondWithError(w, err)
+			return
+		}
+
+		respondWithJSON(w, http.StatusOK, resp)
+	}
+}
+
+// handleAccountDeletion decodes the bare account payload Fibery sends when an
+// account is deleted. Any non-2xx from here interrupts the deletion, so the
+// gate still applies: the gate value is a custom auth field and arrives with
+// the rest of the account.
+func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, WebhookHeaders, WebhookNotification, ResourceParams, Oauth1Extra, Oauth2Extra]) handleAccountDeletion(deletion IntegrationWithAccountDeletion[AccountFields]) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var account Account[AccountFields]
+		if !i.decode(w, r, &account) {
+			return
+		}
+		if !i.authorize(w, account) {
+			return
+		}
+
+		if err := deletion.DeleteAccount(r.Context(), account); err != nil {
+			respondWithError(w, err)
+			return
+		}
+
+		respondWithJSON(w, http.StatusOK, nil)
+	}
+}
+
 func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, WebhookHeaders, WebhookNotification, ResourceParams, Oauth1Extra, Oauth2Extra]) RegisterRoutes(mux *http.ServeMux) error {
 	reserved := make(map[string]struct{})
 	register := func(method, pattern string, h http.Handler) {
@@ -509,6 +552,14 @@ func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, We
 
 	if actions, ok := i.integration.(IntegrationWithAction[AccountFields]); ok {
 		registerFunc(http.MethodPost, "/api/v1/automations/action/execute", i.handleAction(actions))
+	}
+
+	if execute, ok := i.integration.(IntegrationWithExecute[AccountFields]); ok {
+		registerFunc(http.MethodPost, "/api/v1/synchronizer/execute", i.handleExecute(execute))
+	}
+
+	if deletion, ok := i.integration.(IntegrationWithAccountDeletion[AccountFields]); ok {
+		registerFunc(http.MethodDelete, "/api/v1/account", i.handleAccountDeletion(deletion))
 	}
 
 	if relay, ok := i.integration.(IntegrationWithWebhookRelay); ok {

@@ -66,6 +66,37 @@ type IntegrationWithAction[AccountFields any] interface {
 	Action(ctx context.Context, req ActionRequest[AccountFields]) (ActionResponse, *IntegrationError)
 }
 
+// IntegrationWithAccountDeletion cleans up in the third-party system when a
+// Fibery account for this integration is deleted — typically revoking an
+// access token. The framework mounts DELETE {prefix}/api/v1/account when it is
+// implemented.
+//
+// The request body is the account itself rather than an envelope around it, so
+// the handler receives a decoded Account carrying the same fields every other
+// endpoint sees, custom auth fields included.
+//
+// Returning a non-nil error ABORTS the deletion in Fibery. Return one only when
+// retrying would help: if cleanup is permanently impossible (token already
+// revoked, remote 404), log it and return nil, or the user will be left unable
+// to delete their account.
+type IntegrationWithAccountDeletion[AccountFields any] interface {
+	DeleteAccount(ctx context.Context, account Account[AccountFields]) *IntegrationError
+}
+
+// IntegrationWithExecute receives Fibery→source edits of writable fields at
+// {prefix}/api/v1/synchronizer/execute.
+//
+// Three things must line up for this to be called:
+//  1. the app config sets ResponsibleFor.DataProviding
+//  2. the field's DataField sets Writable
+//  3. the type's SyncConfigType.Actions declares ExecuteUpdate
+//
+// Returning a non-nil *IntegrationError surfaces its Status to Fibery; how
+// Fibery reacts to a failed write is unverified.
+type IntegrationWithExecute[AccountFields any] interface {
+	Execute(ctx context.Context, req ExecuteRequest[AccountFields]) (ExecuteResponse, *IntegrationError)
+}
+
 // IntegrationWithWebhookRelay adds a framework-managed webhook relay at
 // {prefix}/webhook. It exists for providers whose webhooks cannot be delivered
 // directly to Fibery (for example a Content-Type Fibery rejects, or a single
