@@ -262,3 +262,49 @@ func TestDecodeJSONInvalidUnmarshalTarget(t *testing.T) {
 		t.Fatalf("expected status 500, got %d", err.Status)
 	}
 }
+
+// Fibery occasionally sends the workspace as an empty object rather than a
+// string. It must decode as "" without loosening strict mode for the rest of
+// the request.
+func TestSyncMetaRequestWorkspace(t *testing.T) {
+	tests := []struct {
+		name    string
+		field   string
+		want    Workspace
+		wantErr string
+	}{
+		{name: "string", field: `,"workspace":"ascent"`, want: "ascent"},
+		{name: "empty object", field: `,"workspace":{}`, want: ""},
+		{name: "empty object with space", field: `,"workspace":{ }`, want: ""},
+		{name: "null", field: `,"workspace":null`, want: ""},
+		{name: "absent", field: ``, want: ""},
+		{name: "non-empty object", field: `,"workspace":{"id":"x"}`, wantErr: "invalid value for field workspace"},
+		{name: "number", field: `,"workspace":1`, wantErr: "invalid value for field workspace"},
+		{name: "strict still applies", field: `,"workspace":{},"extra":1`, wantErr: "invalid json body"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"types":["task"],"account":{"app":"a"}` + tt.field + `}`
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body))
+			var out SyncMetaRequest[testAccountFields]
+
+			err := readJSON(httptest.NewRecorder(), req, &out, 0, true)
+			if tt.wantErr != "" {
+				if err == nil || err.Message != tt.wantErr {
+					t.Fatalf("want error %q, got %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if out.Workspace != tt.want {
+				t.Errorf("workspace = %q, want %q", out.Workspace, tt.want)
+			}
+			if len(out.Types) != 1 || out.Types[0] != "task" {
+				t.Errorf("rest of the request not decoded: %+v", out)
+			}
+		})
+	}
+}

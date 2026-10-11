@@ -1,13 +1,17 @@
 package fibsync
 
-// Fibery→source write-back.
-//
-// When a user edits a writable field, Fibery POSTs the change to
-// {prefix}/api/v1/synchronizer/execute. The endpoint is undocumented; the shape
-// below was captured from a live workspace.
+import (
+	"encoding/json"
+	"fmt"
+)
 
-// ExecuteRequest is the payload Fibery POSTs to /api/v1/synchronizer/execute
-// when a user edits a writable field, once per edit. Fibery re-reads the sync
+// Fibery→source dispatch.
+//
+// Fibery POSTs to {prefix}/api/v1/synchronizer/execute when a user edits a
+// writable field, and again to deliver an ActionSync result. Undocumented;
+// shapes captured from a live workspace.
+
+// ExecuteRequest is what Fibery POSTs, once per edit. Fibery re-reads the sync
 // config immediately beforehand, so changes to SyncConfigType.Actions take
 // effect on the next edit rather than the next resync.
 type ExecuteRequest[A any] struct {
@@ -17,18 +21,64 @@ type ExecuteRequest[A any] struct {
 	Action  ExecuteAction  `json:"action"`
 }
 
-// ExecuteAction maps an action name to the affected entities, grouped by type
-// ID. One call may carry several types and several entities.
-type ExecuteAction map[ExecuteActionName]map[string][]ExecuteEntity
+// ExecuteAction maps an action name to its payload, grouped by key. Payloads stay
+// raw because the shape varies by action: ExecuteUpdate carries entities keyed by
+// type ID (see Entities), ExecuteRefresh whatever the Action returned (see IDs).
+type ExecuteAction map[ExecuteActionName]map[string]json.RawMessage
+
+// IDs decodes a payload as string slices keyed by type ID — the ExecuteRefresh
+// convention, where an Action returning {"<typeID>": "<sourceID>"} accumulates
+// into {"<typeID>": ["id1","id2"]}. Fails if the values are not strings.
+func (a ExecuteAction) IDs(name ExecuteActionName) (map[string][]string, error) {
+	payload, ok := a[name]
+	if !ok {
+		return nil, nil
+	}
+	out := make(map[string][]string, len(payload))
+	for key, raw := range payload {
+		var ids []string
+		if err := json.Unmarshal(raw, &ids); err != nil {
+			return nil, fmt.Errorf("action %q key %q: %w", name, key, err)
+		}
+		out[key] = ids
+	}
+	return out, nil
+}
+
+// Entities decodes a payload as entities keyed by type ID, for ExecuteUpdate. It
+// errors rather than skipping an undecodable key, so an unexpected shape surfaces
+// instead of silently dropping an edit.
+func (a ExecuteAction) Entities(name ExecuteActionName) (map[string][]ExecuteEntity, error) {
+	payload, ok := a[name]
+	if !ok {
+		return nil, nil
+	}
+	out := make(map[string][]ExecuteEntity, len(payload))
+	for key, raw := range payload {
+		var entities []ExecuteEntity
+		if err := json.Unmarshal(raw, &entities); err != nil {
+			return nil, fmt.Errorf("action %q key %q: %w", name, key, err)
+		}
+		out[key] = entities
+	}
+	return out, nil
+}
 
 // ExecuteActionName is an action declared in SyncConfigType.Actions and used as
 // the key of ExecuteRequest.Action.
 type ExecuteActionName string
 
-// ExecuteUpdate is the only action Fibery sends. Entity creation and deletion
-// remain source-owned: use an Action (IntegrationWithAction) that writes to the
-// source, after which the entity appears on the next sync.
-const ExecuteUpdate ExecuteActionName = "update"
+const (
+	// ExecuteUpdate carries a user's edit of a writable field, keyed by type ID.
+	// Creation and deletion stay source-owned: declaring "create" or "delete" is
+	// silently ignored — use an Action that writes to the source instead.
+	ExecuteUpdate ExecuteActionName = "update"
+
+	// ExecuteRefresh delivers an ActionSync result: the Action's Data, accumulated
+	// across the batch. A dispatch back to the integration, not a sync — no
+	// SyncData call follows.
+	ExecuteRefresh ExecuteActionName = "refresh"
+)
 
 // ExecuteEntity is one entity in an execute action. Fields carries only the
 // fields the user changed, unlike SyncData where entities are applied whole.
@@ -62,8 +112,7 @@ func AsRelation(v any) (RelationRef, bool) {
 	return RelationRef{ID: id, Name: name}, true
 }
 
-// ExecuteResponse is the reply to an execute call. Fibery accepts an empty
-// object; no richer response contract is known.
+// ExecuteResponse is the reply to an execute call. Fibery ignores it.
 type ExecuteResponse struct {
 	Data any `json:"data,omitempty"`
 }

@@ -240,6 +240,9 @@ func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, We
 		if !i.decode(w, r, &req) {
 			return
 		}
+		if !i.authorizeFields(w, req.Fields) {
+			return
+		}
 
 		resp, err := oauth1.Oauth1Authorize(r.Context(), req)
 		if err != nil {
@@ -272,6 +275,9 @@ func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, We
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req Oauth2AuthRequest
 		if !i.decode(w, r, &req) {
+			return
+		}
+		if !i.authorizeFields(w, req.Fields) {
 			return
 		}
 
@@ -563,8 +569,8 @@ func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, We
 	}
 
 	if relay, ok := i.integration.(IntegrationWithWebhookRelay); ok {
-		registerFunc(http.MethodPost, "/webhook", i.handleWebhookRelay(relay))
-		i.publicPaths = append(i.publicPaths, i.route("/webhook"))
+		registerFunc(http.MethodPost, "/webhooks", i.handleWebhookRelay(relay))
+		i.publicPaths = append(i.publicPaths, i.route("/webhooks"))
 	}
 
 	if custom, ok := i.integration.(IntegrationWithRoutes); ok {
@@ -595,11 +601,23 @@ func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, We
 }
 
 func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, WebhookHeaders, WebhookNotification, ResourceParams, Oauth1Extra, Oauth2Extra]) authorize(w http.ResponseWriter, account Account[AccountFields]) bool {
+	return i.checkGate(w, account.gate)
+}
+
+// authorizeFields gates an OAuth authorize request, which carries the auth
+// form's values rather than an account. Gating here stops a wrong password
+// before the user is sent to the provider's consent screen.
+func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, WebhookHeaders, WebhookNotification, ResourceParams, Oauth1Extra, Oauth2Extra]) authorizeFields(w http.ResponseWriter, fields map[string]any) bool {
+	presented, _ := fields[accountGateFieldID].(string)
+	return i.checkGate(w, presented)
+}
+
+func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, WebhookHeaders, WebhookNotification, ResourceParams, Oauth1Extra, Oauth2Extra]) checkGate(w http.ResponseWriter, presented string) bool {
 	g := i.handlerOpts.gate
 	if !g.enabled {
 		return true
 	}
-	if g.validate == nil || !g.validate(account.gate) {
+	if g.validate == nil || !g.validate(presented) {
 		respondWithError(w, Unauthorized("invalid access password"))
 		return false
 	}

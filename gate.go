@@ -24,9 +24,14 @@ const accountGateFieldID = "_integration_gate"
 // example a rotating SecretSet) and takes precedence over Secret when both are
 // set.
 //
-// The gate does not protect endpoints that carry no account: Config, logo,
-// OAuth, and webhook pre-process. Protect webhooks with signature verification
-// in WebhookPreProcess instead.
+// The OAuth authorize endpoints carry no account but do carry the auth form's
+// values, so they are gated too: a wrong password is refused before the user
+// reaches the provider's consent screen.
+//
+// The gate does not protect Config, logo, OAuth token exchange, or webhook
+// pre-process. Token exchange is reached only through a gated authorize, and
+// the account it produces is gated again at Validate. Protect webhooks with
+// signature verification in WebhookPreProcess instead.
 type AccountGate struct {
 	Secret      string
 	Validate    func(presented string) bool

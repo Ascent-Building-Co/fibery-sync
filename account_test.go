@@ -23,15 +23,19 @@ func (d *deletionStub) DeleteAccount(_ context.Context, account Account[testAcco
 	return d.err
 }
 
-// The documented payload: the account itself, not an envelope around it.
+// The payload captured from a live workspace on 2026-09-07: the account itself,
+// not an envelope around it, carrying every base field plus the custom auth
+// fields. Pinned verbatim so a change in shape fails here.
 const accountDeletionBody = `{
   "_id": "6a9df71009920ab8e25945d3",
   "app": "6a9df70a83fa9998bb0c3985",
   "auth": "token",
   "enabled": true,
+  "lastUpdatedOn": "2026-09-07T22:24:08.381Z",
+  "masterAccountId": null,
+  "name": "Writable Probe (token1)",
   "owner": "63991dfce0a3c45e5b6b3704",
-  "name": "Joe Doe",
-  "token": "user-token"
+  "token": "token1"
 }`
 
 func newDeletionServer(t *testing.T, integ IntegrationCore[testAccountFields, testPage]) *Server {
@@ -107,8 +111,15 @@ func TestAccountDeletionDecodesBareAccount(t *testing.T) {
 	}
 	// The custom auth field is the one the integration actually needs in order
 	// to revoke anything.
-	if stub.got.AccountFields.Token != "user-token" {
+	if stub.got.AccountFields.Token != "token1" {
 		t.Errorf("custom auth field not decoded: %+v", stub.got.AccountFields)
+	}
+	// A null masterAccountId must not fail the decode.
+	if stub.got.MasterAccountID != "" {
+		t.Errorf("null masterAccountId should decode as empty, got %q", stub.got.MasterAccountID)
+	}
+	if stub.got.LastUpdatedOn.IsZero() {
+		t.Error("lastUpdatedOn not decoded")
 	}
 }
 

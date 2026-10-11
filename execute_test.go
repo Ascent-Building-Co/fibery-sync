@@ -94,7 +94,11 @@ func TestExecuteRequestDecodesCapturedPayload(t *testing.T) {
 		t.Errorf("filter not decoded: %v", got.Filter)
 	}
 
-	entities := got.Action[ExecuteUpdate]["task"]
+	updates, err := got.Action.Entities(ExecuteUpdate)
+	if err != nil {
+		t.Fatalf("Entities: %v", err)
+	}
+	entities := updates["task"]
 	if len(entities) != 1 || entities[0].ID != "t-2" {
 		t.Fatalf("want one entity t-2, got %+v", entities)
 	}
@@ -109,6 +113,94 @@ func TestExecuteRequestDecodesCapturedPayload(t *testing.T) {
 	}
 	if _, ok := AsRelation(entities[0].Fields["dueDate"]); ok {
 		t.Error("a scalar field must not be read as a relation ref")
+	}
+}
+
+// The refresh dispatch carries whatever the Action returned, not entities.
+// Typing the payload as []ExecuteEntity made this body fail to decode at all,
+// 400ing every refresh action — so it is pinned to the captured shape.
+func TestExecuteDecodesRefreshDispatch(t *testing.T) {
+	const body = `{
+	  "account": {"app":"a","token":"token1"},
+	  "action": {"refresh": {"touched": [1]}},
+	  "filter": {},
+	  "types": ["task"]
+	}`
+
+	var req ExecuteRequest[testAccountFields]
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("a refresh dispatch must decode: %v", err)
+	}
+
+	payload, ok := req.Action[ExecuteRefresh]
+	if !ok {
+		t.Fatalf("refresh action missing: %v", req.Action)
+	}
+	if string(payload["touched"]) != "[1]" {
+		t.Errorf("payload should stay raw, got %s", payload["touched"])
+	}
+}
+
+// Asking for entities from a payload that is not entities must report, not panic
+// or silently drop.
+func TestEntitiesReportsUndecodablePayload(t *testing.T) {
+	var req ExecuteRequest[testAccountFields]
+	if err := json.Unmarshal([]byte(`{"action":{"refresh":{"touched":[1]}}}`), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if _, err := req.Action.Entities(ExecuteRefresh); err == nil {
+		t.Error("expected an error decoding a non-entity payload as entities")
+	}
+}
+
+// An action that is not present yields nothing, not an error.
+func TestEntitiesAbsentActionIsNotAnError(t *testing.T) {
+	var req ExecuteRequest[testAccountFields]
+	if err := json.Unmarshal([]byte(`{"action":{"refresh":{}}}`), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	got, err := req.Action.Entities(ExecuteUpdate)
+	if err != nil {
+		t.Errorf("absent action should not error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("want nothing, got %v", got)
+	}
+}
+
+// Results accumulate across a batch: one invocation per entity, one dispatch.
+func TestRefreshDispatchAccumulatesAcrossBatch(t *testing.T) {
+	const body = `{
+	  "account": {"app":"a","token":"token1"},
+	  "action": {"refresh": {"task": ["t-1","t-2","t-3"]}},
+	  "types": ["task"]
+	}`
+
+	var req ExecuteRequest[testAccountFields]
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	refreshed, err := req.Action.IDs(ExecuteRefresh)
+	if err != nil {
+		t.Fatalf("IDs: %v", err)
+	}
+	if got := refreshed["task"]; len(got) != 3 || got[0] != "t-1" || got[2] != "t-3" {
+		t.Errorf("want the whole batch, got %v", got)
+	}
+}
+
+// An Action returning non-string data still decodes as a request; only the IDs
+// helper declines it.
+func TestIDsReportsNonStringPayload(t *testing.T) {
+	var req ExecuteRequest[testAccountFields]
+	if err := json.Unmarshal([]byte(`{"action":{"refresh":{"touched":[1,1]}}}`), &req); err != nil {
+		t.Fatalf("a numeric batch must still decode: %v", err)
+	}
+	if _, err := req.Action.IDs(ExecuteRefresh); err == nil {
+		t.Error("expected an error decoding numbers as ids")
 	}
 }
 

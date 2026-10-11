@@ -279,3 +279,85 @@ func TestAddIntegrationGateFailClosed(t *testing.T) {
 		t.Fatalf("expected error when gate enabled without Secret or Validate")
 	}
 }
+
+// oauthStub records whether the integration's OAuth authorize was reached.
+type oauthStub struct {
+	gateStub
+	reached bool
+}
+
+func (o *oauthStub) Oauth1Authorize(context.Context, Oauth1AuthRequest) (Oauth1AuthResponse, *IntegrationError) {
+	o.reached = true
+	return Oauth1AuthResponse{RedirectURI: "https://provider/authorize"}, nil
+}
+func (o *oauthStub) Oauth1Token(context.Context, Oauth1TokenRequest[struct{}]) (testAccountFields, *IntegrationError) {
+	return testAccountFields{}, nil
+}
+func (o *oauthStub) Oauth2Authorize(context.Context, Oauth2AuthRequest) (Oauth2AuthResponse, *IntegrationError) {
+	o.reached = true
+	return Oauth2AuthResponse{RedirectURI: "https://provider/authorize"}, nil
+}
+func (o *oauthStub) Oauth2TokenRequest(context.Context, Oauth2TokenRequest[struct{}]) (testAccountFields, *IntegrationError) {
+	return testAccountFields{}, nil
+}
+
+// The authorize requests carry the auth form's values, gate included, so a
+// wrong password must stop the flow before the provider's consent screen.
+func TestAccountGateOAuthAuthorize(t *testing.T) {
+	type handler = integrationHandler[testAccountFields, testPage, testWebhookParams, testWebhookReply, testWebhookHeaders, testWebhookNotification, testResourceParams, struct{}, struct{}]
+
+	endpoints := []struct {
+		name string
+		body string
+		call func(h *handler, stub *oauthStub) http.HandlerFunc
+	}{
+		{
+			name: "oauth1",
+			body: `{"callback_uri":"https://cb"%s}`,
+			call: func(h *handler, stub *oauthStub) http.HandlerFunc { return h.handleOauth1Authorize(stub) },
+		},
+		{
+			name: "oauth2",
+			body: `{"callback_uri":"https://cb","state":"s","auth":"oauth2"%s}`,
+			call: func(h *handler, stub *oauthStub) http.HandlerFunc { return h.handleOauth2Authorize(stub) },
+		},
+	}
+
+	cases := []struct {
+		name     string
+		gate     bool
+		fields   string
+		wantCode int
+	}{
+		{name: "correct secret passes", gate: true, fields: `,"fields":{"_integration_gate":"letmein"}`, wantCode: http.StatusOK},
+		{name: "wrong secret rejected", gate: true, fields: `,"fields":{"_integration_gate":"wrong"}`, wantCode: http.StatusUnauthorized},
+		{name: "missing secret rejected", gate: true, fields: `,"fields":{}`, wantCode: http.StatusUnauthorized},
+		{name: "missing fields rejected", gate: true, fields: ``, wantCode: http.StatusUnauthorized},
+		{name: "non-string secret rejected", gate: true, fields: `,"fields":{"_integration_gate":1}`, wantCode: http.StatusUnauthorized},
+		{name: "disabled gate passes", gate: false, fields: ``, wantCode: http.StatusOK},
+	}
+
+	for _, ep := range endpoints {
+		for _, tc := range cases {
+			t.Run(ep.name+"/"+tc.name, func(t *testing.T) {
+				stub := &oauthStub{}
+				var opts []HandlerOption
+				if tc.gate {
+					opts = append(opts, WithAccountGate(AccountGate{Secret: "letmein"}))
+				}
+				h := newGateHandler(&stub.gateStub, opts...)
+
+				body := fmt.Sprintf(ep.body, tc.fields)
+				res := httptest.NewRecorder()
+				ep.call(h, stub)(res, httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(body)))
+
+				if res.Code != tc.wantCode {
+					t.Fatalf("expected %d, got %d: %s", tc.wantCode, res.Code, res.Body.String())
+				}
+				if want := tc.wantCode == http.StatusOK; stub.reached != want {
+					t.Fatalf("integration reached = %v, want %v", stub.reached, want)
+				}
+			})
+		}
+	}
+}

@@ -159,6 +159,78 @@ registered as a public path, so `Server.IPAllowlistMiddleware` exempts it
 automatically — point the provider's callback at `{prefix}/webhook`. Enablement is
 by capability: implementing the interface turns the relay on.
 
+## How Fibery applies your data
+
+Three rules govern every sync, and none are obvious from the API.
+
+**Entities are applied whole.** A field absent from an item becomes `null`, not
+"unchanged". There is no way to send a partial update.
+
+**Fibery diffs against the last values you sent, not against what it displays.**
+It keeps a baseline per entity. If your payload matches that baseline nothing is
+applied at all — even if the entity now shows something different because a user
+edited a writable field.
+
+**So a local edit survives until anything else on that entity changes.** With
+`name` writable and `points` read-only:
+
+| # | event | you send | Fibery shows |
+|---|---|---|---|
+| 1 | first sync | `{name:A, points:3}` | name=A |
+| 2 | user edits Name | — | **name=MY EDIT** |
+| 3 | sync, source quiet | `{name:A, points:3}` | name=MY EDIT — matches baseline, nothing applied |
+| 4 | **source changes points** | `{name:A, points:5}` | **name=A** — differs, so the whole entity is re-applied |
+
+Row 4 is the trap: `points` changed, `name` did not, and `name` was dragged back
+anyway. The loss is not on a timer — it arrives with the next unrelated source
+change, so it survives casual testing and shows up in production.
+
+### Deletion
+
+| sync type | omitting an entity | omitting a field |
+|---|---|---|
+| full | **deletes** it | **nulls** it |
+| delta | leaves it alone | leaves it alone |
+
+In a full sync the response *is* the complete set. In a delta sync absence means
+unchanged, so deletion needs an explicit `SyncAction` marker — and you must track
+what Fibery holds in order to send one.
+
+### What this means for writable fields
+
+**You must know the current value of every writable field you emit**, or a full
+sync will destroy it. Three workable shapes:
+
+1. **Declare `ExecuteUpdate`, store every edit, and overlay it on each response.**
+   The connector always emits the current value, so nothing is clobbered.
+2. **Use delta and omit drafted entities entirely.** Costs tracking Fibery's
+   contents so deletions can still be signalled.
+3. **Put the data in a native Fibery database** related to the synced one. The
+   connector never writes it, so nothing can clobber it. The right answer when the
+   value has no representation in the external service.
+
+A writable field with no `ExecuteUpdate` is editable but unprotectable: you never
+learn the value, so you cannot re-send it.
+
+### What Fibery caches
+
+| document | re-read when |
+|---|---|
+| app config (`Config`) | `Version` is bumped, or the account re-authenticates |
+| sync config (`SyncConfig`) | before every `Execute`, and on sync setup |
+| schema (`SyncSchema`) | sync setup only — unsync/resync to pick up a new field |
+
+A new field also arrives with Fibery holding `ignore: true` on an already-synced
+database, whatever you send. `DataRequest.Schema` reports its actual value.
+
+### When data is actually requested
+
+Clicking Sync does not start one. Observed across 34 manual syncs, data arrives
+between 0 and 97 seconds later, never beyond ~100s, and identically with or
+without writable fields — a periodic scheduler picking up a queued job. Nothing
+the connector does changes it. The only way to get data in immediately is to POST
+to Fibery's webhook intake and answer the `WebhookTransform` callback.
+
 ## Writable fields (Fibery → source)
 
 A synced field can be made editable in Fibery, with the edit pushed back to the
@@ -187,7 +259,11 @@ Implement `IntegrationWithExecute` to receive the edits; the framework mounts
 
 ```go
 func (i *Integration) Execute(ctx context.Context, req fibsync.ExecuteRequest[AccountFields]) (fibsync.ExecuteResponse, *fibsync.IntegrationError) {
-	for typeID, entities := range req.Action[fibsync.ExecuteUpdate] {
+	updates, err := req.Action.Entities(fibsync.ExecuteUpdate)
+	if err != nil {
+		return fibsync.ExecuteResponse{}, fibsync.BadRequest(err.Error())
+	}
+	for typeID, entities := range updates {
 		for _, e := range entities {
 			for fieldID, v := range e.Fields {
 				// Relations arrive as {id, name}; scalars are plain values.
@@ -205,18 +281,44 @@ func (i *Integration) Execute(ctx context.Context, req fibsync.ExecuteRequest[Ac
 }
 ```
 
+The endpoint is a general dispatch channel, not only write-back: an `Action`
+declaring `Sync` is delivered here too, under `ExecuteRefresh`. Payloads are
+therefore kept raw and decoded per action — see below.
+
 Worth knowing:
 
 - Fibery calls this **once per edit**, and re-reads the sync config immediately
   beforehand, so changes to `Actions` take effect on the next edit.
 - `Fields` carries **only what changed**, unlike `SyncData` where entities are
-  applied whole.
+  applied whole — see [How Fibery applies your data](#how-fibery-applies-your-data),
+  which also covers why a writable field needs the connector to remember its value.
 - Only `ExecuteUpdate` is honored. `create` and `delete` can be declared but
   Fibery never sends them — creation and deletion stay source-owned, so use an
   `Action` that writes to the source and let the entity appear on the next sync.
 - Fibery accepts an empty response. How it reacts to a non-2xx is unverified.
-- `Config` caches on Fibery's side: bump `Version` whenever you change it, or
-  the `DataProviding` change above will not be picked up.
+- Bump `Config.Version` after changing `DataProviding`, or Fibery keeps serving
+  the cached app config and the change never takes effect.
+
+### Action results routed back (`ActionSync`)
+
+An `Action` that sets `Sync: &fibsync.ActionSync{Action: fibsync.ActionSyncRefresh}`
+has its `ActionResponse.Data` POSTed back to `Execute` once it completes, under
+`ExecuteRefresh`. Despite the name **no synchronization runs**; nothing calls
+`SyncData` on its own.
+
+```go
+// Action returns:   ActionResponse{Data: map[string]any{"task": "t-1"}}
+// Execute receives: {"refresh": {"task": ["t-1"]}}
+```
+
+Results are batched: the action runs once per entity and Fibery accumulates each
+`Data` by key, so three entities arrive as
+`{"refresh": {"task": ["t-1","t-2","t-3"]}}`. Fibery returns `Data` verbatim
+without interpreting it.
+
+Because the payload is whatever the action returned rather than entities,
+`ExecuteAction` stores it raw. Use `Action.IDs(name)` for the id convention above,
+or `Action.Entities(name)` where you do expect entities.
 
 ## Account deletion cleanup
 

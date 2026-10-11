@@ -2,6 +2,7 @@ package fibsync
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -31,17 +32,16 @@ type InitConfig struct {
 type Config struct {
 	Name    string `json:"name"`
 	Website string `json:"website,omitempty"`
-	// Version must be bumped whenever anything else in Config changes: Fibery
-	// caches the app config and re-reads it only on a version bump or re-auth.
-	// The sync config and schema are not cached this way.
+	// Version must be bumped on any other Config change: Fibery caches the app
+	// config and re-reads it only on a version bump or re-auth. Sync config and
+	// schema are not.
 	Version        string           `json:"version"`
 	Description    string           `json:"description"`
 	Authentication []Authentication `json:"authentication"`
 	Sources        []any            `json:"sources"`
 	ResponsibleFor Responsibilities `json:"responsibleFor"`
 	Actions        []Action         `json:"actions"`
-	// Features carries optional app-level feature flags. Jira is the only known
-	// app to set any ({"timezone": true}); effects are unverified.
+	// Features carries app-level flags. Only Jira sets any ({"timezone": true}).
 	Features map[string]any `json:"features,omitempty"`
 }
 
@@ -116,8 +116,7 @@ type Responsibilities struct {
 	Sync        bool `json:"dataSynchronization,omitempty"`
 	Import      bool `json:"dataImport,omitempty"`
 	Automations bool `json:"automations,omitempty"`
-	// DataProviding gates whether Fibery honors per-field DataField.Writable.
-	// Leave nil to omit the key.
+	// DataProviding gates whether Fibery honors DataField.Writable. Nil omits it.
 	DataProviding *bool `json:"dataProviding,omitempty"`
 	UserAuth      *bool `json:"userAuthentication,omitempty"`
 }
@@ -129,15 +128,26 @@ type Action struct {
 	Icon        string      `json:"icon,omitempty"`
 	Description string      `json:"description,omitempty"`
 	Args        []ActionArg `json:"args"`
-	// Sync asks Fibery to run a sync once the action completes. Both Jira
-	// actions set {"action": "refresh"}; unverified.
+	// Sync routes this Action's result back to Execute once it completes.
 	Sync *ActionSync `json:"sync,omitempty"`
 }
 
-// ActionSync requests a sync after an Action runs.
+// ActionSync routes an Action's ActionResponse.Data back to IntegrationWithExecute
+// once it completes. It does not run a synchronization.
+//
+// Results are batched: an Action invoked over several entities runs once per
+// entity and Fibery accumulates each Data by key, so returning {"task": "<id>"}
+// over three entities arrives once as {"refresh": {"task": ["t-1","t-2","t-3"]}}.
+// Fibery returns Data verbatim without interpreting it.
+//
+// A completion callback only — Fibery ignores both the Action's response body and
+// the ExecuteResponse — so act on it by pushing to Fibery's webhook intake.
 type ActionSync struct {
-	Action string `json:"action"` // "refresh"
+	Action ExecuteActionName `json:"action"`
 }
+
+// ActionSyncRefresh is the only ActionSync.Action value observed in the wild.
+const ActionSyncRefresh = ExecuteRefresh
 
 type ActionArg struct {
 	ID               string             `json:"id"`
@@ -188,17 +198,13 @@ type SyncConfigType struct {
 	Name string `json:"name"`
 	// Default pre-selects the type in Fibery's sync setup UI.
 	Default bool `json:"default,omitempty"`
-	// VerifyEntitiesExist is set by Jira on its one primary type. It has no
-	// effect a self-hosted connector can observe: it changes neither sync
-	// behavior (full or delta), nor the DataRequest, nor write-back. Exposed for
-	// parity with Jira; do not expect it to do anything.
+	// VerifyEntitiesExist is set by Jira on its primary type but has no effect a
+	// self-hosted connector can observe. Exposed for parity only.
 	VerifyEntitiesExist bool `json:"verifyEntitiesExist,omitempty"`
-	// Actions declares the write-back actions Fibery may invoke on this type.
-	// Declaring ExecuteUpdate is what makes Fibery POST a user's edit of a
-	// writable field to /api/v1/synchronizer/execute; without it the edit stays
-	// local to Fibery. The declared names are the keys of ExecuteRequest.Action.
-	//
-	// Only ExecuteUpdate is honored; other names are silently ignored.
+	// Actions declares the write-back actions Fibery may invoke on this type, and
+	// names the keys of ExecuteRequest.Action. Declaring ExecuteUpdate is what
+	// makes Fibery POST a field edit to Execute; without it the edit stays inside
+	// Fibery. Only ExecuteUpdate is honored — other names are silently ignored.
 	Actions SyncTypeActions `json:"actions,omitempty"`
 }
 
@@ -254,14 +260,16 @@ const (
 )
 
 type DataField struct {
-	Name        string `json:"name"`
+	Name string `json:"name"`
+	// Ignore excludes the field from the sync, but only as a default: Fibery owns
+	// the selection once a database exists, and a field added to an already-synced
+	// database defaults to ignored. DataRequest.Schema reports Fibery's actual value.
 	Ignore      bool   `json:"ignore,omitzero"`
 	Description string `json:"description,omitzero"`
 	ReadOnly    bool   `json:"readonly,omitzero"`
-	// Writable allows for the field to be overwritten in Fibery. Requires the
-	// app config to set ResponsibleFor.DataProviding. For the edit to reach the
-	// integration, the type's SyncConfigType.Actions must also declare
-	// ExecuteUpdate; otherwise it stays local to Fibery.
+	// Writable allows the field to be edited in Fibery. Requires
+	// ResponsibleFor.DataProviding; for the edit to reach the integration the type
+	// must also declare ExecuteUpdate in SyncConfigType.Actions.
 	Writable     bool               `json:"writable,omitzero"`
 	FieldType    DataFieldType      `json:"type,omitzero"`
 	FieldSubType DataFieldSubtype   `json:"subType,omitzero"`
@@ -423,9 +431,40 @@ type SyncMetaRequest[A any] struct {
 	Account   Account[A]     `json:"account"`
 	Filter    map[string]any `json:"filter"`
 	CreatedAt time.Time      `json:"createdAt"`
-	Workspace string         `json:"workspace,omitempty"`
+	Workspace Workspace      `json:"workspace,omitempty"`
 	Space     string         `json:"space,omitempty"`
 	UserID    string         `json:"userId,omitempty"`
+}
+
+// Workspace is the Fibery workspace a request came from. Fibery usually sends
+// a string but occasionally an empty object, which decodes as "". Any other
+// non-string value is still an error.
+//
+// Decoding is per field rather than on the enclosing request so that strict
+// mode still rejects unknown fields everywhere else in it.
+type Workspace string
+
+func (w *Workspace) UnmarshalJSON(b []byte) error {
+	var s string
+	err := json.Unmarshal(b, &s)
+	if err == nil {
+		*w = Workspace(s)
+		return nil
+	}
+
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(b, &obj) == nil && len(obj) == 0 {
+		*w = ""
+		return nil
+	}
+
+	// The decoder adds no field context to an Unmarshaler's error, so name it
+	// here; otherwise the 400 does not say which field was wrong.
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		typeErr.Field = "workspace"
+	}
+	return err
 }
 
 type SyncSchema map[string]map[string]DataField
@@ -438,12 +477,10 @@ type DataRequest[A, P any] struct {
 	Filter             map[string]any                  `json:"filter"`
 	Account            Account[A]                      `json:"account"`
 	LastSynchronizedAt time.Time                       `json:"lastSynchronizedAt"`
-	// LastFullSynchronizedAt is the start of the previous full sync, distinct
-	// from LastSynchronizedAt. Zero on an account's first sync.
+	// LastFullSynchronizedAt is the start of the previous full sync. Zero on the first.
 	LastFullSynchronizedAt time.Time `json:"lastFullSynchronizedAt"`
-	// LastSynchronizationCheckpoint is an opaque cursor Fibery echoes back
-	// between syncs. Always null in observation; whether Fibery reads a
-	// checkpoint out of the data response, and under what key, is unverified.
+	// LastSynchronizationCheckpoint is an opaque cursor Fibery echoes between syncs.
+	// Always null in observation; how one is returned is unknown.
 	LastSynchronizationCheckpoint json.RawMessage `json:"lastSynchronizationCheckpoint,omitempty"`
 	CreatedAt                     time.Time       `json:"createdAt"`
 	Workspace                     any             `json:"workspace,omitempty"`
@@ -451,8 +488,8 @@ type DataRequest[A, P any] struct {
 }
 
 type DataResponse[P any] struct {
-	// Items are applied whole. A field absent from an item becomes null rather
-	// than staying unchanged, so never return a partial entity.
+	// Items are applied whole: a field absent from an item becomes null, so never
+	// return a partial entity.
 	Items               []map[string]any `json:"items"`
 	Pagination          Pagination[P]    `json:"pagination"`
 	SynchronizationType SyncType         `json:"synchronizationType,omitempty"`
@@ -513,6 +550,8 @@ type ResourceStream struct {
 
 type Oauth1AuthRequest struct {
 	CallbackURI string `json:"callback_uri"`
+	// Fields carries the values entered in the auth form, account gate included.
+	Fields map[string]any `json:"fields,omitempty"`
 }
 
 type Oauth1AuthResponse struct {
@@ -566,10 +605,11 @@ func (r *Oauth1TokenRequest[F]) UnmarshalJSON(b []byte) error {
 const OAuth2DefaultCallbackURI = "https://oauth-svc.fibery.io/callback"
 
 type Oauth2AuthRequest struct {
-	CallbackURI string         `json:"callback_uri"`
-	State       string         `json:"state"`
-	Fields      map[string]any `json:"fields,omitempty"`
-	Auth        string         `json:"auth"`
+	CallbackURI string `json:"callback_uri"`
+	State       string `json:"state"`
+	// Fields carries the values entered in the auth form, account gate included.
+	Fields map[string]any `json:"fields,omitempty"`
+	Auth   string         `json:"auth"`
 }
 
 type Oauth2AuthResponse struct {
