@@ -73,11 +73,18 @@ type IntegrationWithAction[AccountFields any] interface {
 // The body is the bare account, carrying the same fields every other endpoint
 // sees, custom auth fields included.
 //
+// The route is exempt from the account gate, so an account can still be
+// deleted after the gate secret is rotated. authorized reports whether the
+// request passed the gate, and is always true when no gate is configured. An
+// unauthorized request may come from anyone who can reach the server, so it
+// must act only on what its own credentials prove: revoking the token it
+// carries is safe; touching server-side state found by the account id is not.
+//
 // A non-nil error ABORTS the deletion. Return one only when retrying would help;
 // if cleanup is permanently impossible, log it and return nil or the user cannot
 // delete their account.
 type IntegrationWithAccountDeletion[AccountFields any] interface {
-	DeleteAccount(ctx context.Context, account Account[AccountFields]) *IntegrationError
+	DeleteAccount(ctx context.Context, account Account[AccountFields], authorized bool) *IntegrationError
 }
 
 // IntegrationWithExecute receives Fibery→source dispatches at

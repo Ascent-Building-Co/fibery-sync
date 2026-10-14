@@ -32,6 +32,10 @@ const accountGateFieldID = "_integration_gate"
 // pre-process. Token exchange is reached only through a gated authorize, and
 // the account it produces is gated again at Validate. Protect webhooks with
 // signature verification in WebhookPreProcess instead.
+//
+// Account deletion is not refused either, so rotating the secret never leaves
+// an account that cannot be deleted; the integration is told whether the gate
+// passed (see IntegrationWithAccountDeletion).
 type AccountGate struct {
 	Secret      string
 	Validate    func(presented string) bool

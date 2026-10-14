@@ -12,14 +12,16 @@ import (
 // IntegrationWithAccountDeletion.
 type deletionStub struct {
 	minimalIntegration
-	called bool
-	got    Account[testAccountFields]
-	err    *IntegrationError
+	called     bool
+	got        Account[testAccountFields]
+	authorized bool
+	err        *IntegrationError
 }
 
-func (d *deletionStub) DeleteAccount(_ context.Context, account Account[testAccountFields]) *IntegrationError {
+func (d *deletionStub) DeleteAccount(_ context.Context, account Account[testAccountFields], authorized bool) *IntegrationError {
 	d.called = true
 	d.got = account
+	d.authorized = authorized
 	return d.err
 }
 
@@ -68,6 +70,9 @@ func TestAccountDeletionRouteIsOptIn(t *testing.T) {
 		}
 		if !stub.called {
 			t.Error("DeleteAccount was not called")
+		}
+		if !stub.authorized {
+			t.Error("with no gate configured, every deletion is authorized")
 		}
 	})
 
@@ -133,30 +138,42 @@ func TestAccountDeletionErrorAbortsDeletion(t *testing.T) {
 	}
 }
 
-// The gate value rides along as a custom auth field, so it is enforced here
-// like on every other account-bearing route.
-func TestAccountDeletionRespectsAccountGate(t *testing.T) {
+// The gate is reported, not enforced: a wrong or missing secret still reaches
+// the integration, flagged, so an account stays deletable after a rotation.
+func TestAccountDeletionReportsAccountGate(t *testing.T) {
 	stub := &deletionStub{}
 	h := &integrationHandler[testAccountFields, testPage, testWebhookParams, testWebhookReply, testWebhookHeaders, testWebhookNotification, testResourceParams, struct{}, struct{}]{
 		integration: stub,
 	}
 	WithAccountGate(AccountGate{Secret: "letmein"})(&h.handlerOpts)
 
-	call := func(body string) int {
-		req := httptest.NewRequest(http.MethodDelete, "/api/v1/account", bytes.NewBufferString(body))
-		res := httptest.NewRecorder()
-		h.handleAccountDeletion(stub)(res, req)
-		return res.Result().StatusCode
-	}
+	for _, tc := range []struct {
+		name, body string
+		authorized bool
+	}{
+		{"correct secret", `{"app":"a","token":"t","_integration_gate":"letmein"}`, true},
+		{"wrong secret", `{"app":"a","token":"t","_integration_gate":"wrong"}`, false},
+		{"missing secret", `{"app":"a","token":"t"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub.called = false
+			req := httptest.NewRequest(http.MethodDelete, "/api/v1/account", bytes.NewBufferString(tc.body))
+			res := httptest.NewRecorder()
+			h.handleAccountDeletion(stub)(res, req)
 
-	if code := call(`{"app":"a","token":"t","_integration_gate":"letmein"}`); code != http.StatusOK {
-		t.Errorf("correct secret should pass, got %d", code)
-	}
-	if code := call(`{"app":"a","token":"t","_integration_gate":"wrong"}`); code != http.StatusUnauthorized {
-		t.Errorf("wrong secret should be rejected, got %d", code)
-	}
-	if code := call(`{"app":"a","token":"t"}`); code != http.StatusUnauthorized {
-		t.Errorf("missing secret should be rejected, got %d", code)
+			if code := res.Result().StatusCode; code != http.StatusOK {
+				t.Errorf("status = %d, want 200", code)
+			}
+			if !stub.called {
+				t.Fatal("DeleteAccount was not called")
+			}
+			if stub.authorized != tc.authorized {
+				t.Errorf("authorized = %v, want %v", stub.authorized, tc.authorized)
+			}
+			if stub.got.AccountFields.Token != "t" {
+				t.Errorf("account not passed through: %+v", stub.got.AccountFields)
+			}
+		})
 	}
 }
 

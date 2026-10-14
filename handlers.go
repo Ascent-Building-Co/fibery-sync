@@ -459,19 +459,16 @@ func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, We
 
 // handleAccountDeletion decodes the bare account payload Fibery sends when an
 // account is deleted. Any non-2xx from here interrupts the deletion, so the
-// gate still applies: the gate value is a custom auth field and arrives with
-// the rest of the account.
+// account gate is reported rather than enforced: an account whose stored
+// secret predates a rotation must still be deletable. The integration limits
+// what an unauthorized deletion does (see IntegrationWithAccountDeletion).
 func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, WebhookHeaders, WebhookNotification, ResourceParams, Oauth1Extra, Oauth2Extra]) handleAccountDeletion(deletion IntegrationWithAccountDeletion[AccountFields]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var account Account[AccountFields]
 		if !i.decode(w, r, &account) {
 			return
 		}
-		if !i.authorize(w, account) {
-			return
-		}
-
-		if err := deletion.DeleteAccount(r.Context(), account); err != nil {
+		if err := deletion.DeleteAccount(r.Context(), account, i.gatePasses(account.gate)); err != nil {
 			respondWithError(w, err)
 			return
 		}
@@ -613,15 +610,21 @@ func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, We
 }
 
 func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, WebhookHeaders, WebhookNotification, ResourceParams, Oauth1Extra, Oauth2Extra]) checkGate(w http.ResponseWriter, presented string) bool {
-	g := i.handlerOpts.gate
-	if !g.enabled {
-		return true
-	}
-	if g.validate == nil || !g.validate(presented) {
+	if !i.gatePasses(presented) {
 		respondWithError(w, Unauthorized("invalid access password"))
 		return false
 	}
 	return true
+}
+
+// gatePasses reports whether presented satisfies the account gate. It is
+// always true when no gate is configured.
+func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, WebhookHeaders, WebhookNotification, ResourceParams, Oauth1Extra, Oauth2Extra]) gatePasses(presented string) bool {
+	g := i.handlerOpts.gate
+	if !g.enabled {
+		return true
+	}
+	return g.validate != nil && g.validate(presented)
 }
 
 func (i *integrationHandler[AccountFields, Page, WebhookParams, WebhookReply, WebhookHeaders, WebhookNotification, ResourceParams, Oauth1Extra, Oauth2Extra]) decode(w http.ResponseWriter, r *http.Request, v any) bool {

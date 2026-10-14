@@ -328,7 +328,7 @@ usually revoking an access token. Implement `IntegrationWithAccountDeletion` and
 the framework mounts the route.
 
 ```go
-func (i *Integration) DeleteAccount(ctx context.Context, account fibsync.Account[AccountFields]) *fibsync.IntegrationError {
+func (i *Integration) DeleteAccount(ctx context.Context, account fibsync.Account[AccountFields], authorized bool) *fibsync.IntegrationError {
 	if err := revokeToken(ctx, account.AccountFields.Token); err != nil {
 		// Only block deletion if retrying would help.
 		slog.Warn("token revoke failed", "account", account.ID, "err", err)
@@ -338,8 +338,14 @@ func (i *Integration) DeleteAccount(ctx context.Context, account fibsync.Account
 ```
 
 The request body is the account itself rather than an envelope around it, but it
-carries the same fields every other endpoint sees, custom auth fields included,
-so the account gate applies here too.
+carries the same fields every other endpoint sees, custom auth fields included.
+
+**The account gate is reported, not enforced.** An account whose stored secret
+predates a rotation must still be deletable, so the route never answers 401;
+`authorized` says whether the gate passed. An unauthorized call may come from
+anyone who can reach the server, so act only on what its own credentials prove:
+revoking the token it carries is safe, while anything found by the account id —
+a live session, cached state — is not.
 
 **A non-2xx response aborts the deletion in Fibery.** Return an error only when
 the caller should retry. If cleanup is permanently impossible — token already
