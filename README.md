@@ -139,7 +139,7 @@ the middleware.
 Some providers cannot deliver webhooks straight to fibsync (an unsupported
 Content-Type, a single callback URL fronting several endpoints, etc.). Implement
 `IntegrationWithWebhookRelay` and the framework mounts a relay at
-`{prefix}/webhook` that forwards each inbound delivery to a target you resolve
+`{prefix}/webhooks` that forwards each inbound delivery to a target you resolve
 and mirrors the upstream response back:
 
 ```go
@@ -156,7 +156,7 @@ The framework owns the mechanics (body read subject to `WithMaxBody`, hop-by-hop
 header stripping, forwarding via the configured HTTP client under a timeout, and
 response mirroring); you only resolve where each delivery goes. The relay path is
 registered as a public path, so `Server.IPAllowlistMiddleware` exempts it
-automatically — point the provider's callback at `{prefix}/webhook`. Enablement is
+automatically — point the provider's callback at `{prefix}/webhooks`. Enablement is
 by capability: implementing the interface turns the relay on.
 
 ## How Fibery applies your data

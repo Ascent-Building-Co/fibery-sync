@@ -93,7 +93,7 @@ type IntegrationWithExecute[AccountFields any] interface {
 }
 
 // IntegrationWithWebhookRelay adds a framework-managed webhook relay at
-// {prefix}/webhook. It exists for providers whose webhooks cannot be delivered
+// {prefix}/webhooks. It exists for providers whose webhooks cannot be delivered
 // directly to Fibery (for example a Content-Type Fibery rejects, or a single
 // callback URL fronting multiple endpoints): the provider is pointed at the
 // relay, which forwards each delivery on to the resolved target and mirrors the
@@ -106,7 +106,7 @@ type IntegrationWithExecute[AccountFields any] interface {
 // public path, so Server.IPAllowlistMiddleware exempts it automatically.
 type IntegrationWithWebhookRelay interface {
 	// WebhookRelay resolves the forwarding target for a webhook received at
-	// {prefix}/webhook. rawBody and header are the inbound request's body and
+	// {prefix}/webhooks. rawBody and header are the inbound request's body and
 	// headers. Return a non-nil *IntegrationError to reject the delivery; its
 	// Status becomes the response status.
 	WebhookRelay(ctx context.Context, rawBody []byte, header http.Header) (RelayTarget, *IntegrationError)

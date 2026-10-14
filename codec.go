@@ -134,15 +134,17 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Write(dat)
 }
 
+// respondWithError writes err as the response. Its message goes on the
+// request's access record when RequestLogMiddleware is installed; without
+// it, only server errors are logged, here.
 func respondWithError(w http.ResponseWriter, err *IntegrationError) {
 	status := err.Status
-
-	if err.Status >= 500 {
-		slog.Error(err.Error(), "StatusCode", err.Status)
+	if status == 0 {
+		status = http.StatusInternalServerError
 	}
 
-	if err.Status == 0 {
-		status = http.StatusInternalServerError
+	if !recordError(w, err) && status >= 500 {
+		slog.Error(err.Error(), "StatusCode", status)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

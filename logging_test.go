@@ -124,3 +124,64 @@ func TestRequestLogComposesWithGzip(t *testing.T) {
 		t.Fatalf("expected logged bytes to be the compressed size (0 < n < 1000), got %v", logged)
 	}
 }
+
+func TestRequestLogRecordsErrorResponses(t *testing.T) {
+	cases := []struct {
+		name      string
+		err       *IntegrationError
+		wantLevel string
+	}{
+		{"client error", Unauthorized("invalid access password"), "WARN"},
+		{"server error", InternalError("boom"), "ERROR"},
+		{"unset status", &IntegrationError{Message: "no status"}, "ERROR"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fallback := withCountingLogger(t)
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+			// Logging outermost and gzip inner, as fibery-services stacks
+			// them, so the recorder is found through gzip's Unwrap.
+			h := RequestLogMiddleware(RequestLog{Logger: logger})(
+				GzipMiddleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					respondWithError(w, tc.err)
+				})),
+			)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/synchronizer/data", nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+			req.RemoteAddr = "203.0.113.5:1"
+			h.ServeHTTP(httptest.NewRecorder(), req)
+
+			rec := decodeLog(t, &buf)
+			if rec["level"] != tc.wantLevel {
+				t.Errorf("level = %v, want %s", rec["level"], tc.wantLevel)
+			}
+			if rec["error"] != tc.err.Message {
+				t.Errorf("error = %v, want %q", rec["error"], tc.err.Message)
+			}
+			if n := fallback.count.Load(); n != 0 {
+				t.Errorf("error also logged separately (%d records)", n)
+			}
+		})
+	}
+}
+
+func TestRequestLogSuccessKeepsConfiguredLevel(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h := RequestLogMiddleware(RequestLog{Logger: logger, Level: slog.LevelDebug})(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "203.0.113.5:1"
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	rec := decodeLog(t, &buf)
+	if rec["level"] != "DEBUG" {
+		t.Errorf("level = %v, want DEBUG", rec["level"])
+	}
+	if _, ok := rec["error"]; ok {
+		t.Errorf("successful request logged an error: %v", rec["error"])
+	}
+}

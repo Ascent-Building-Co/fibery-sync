@@ -55,7 +55,7 @@ func TestHandleWebhookRelayForwards(t *testing.T) {
 	}}
 	h := newRelayHandler(serverOptions{httpClient: upstream.Client()})
 
-	req := httptest.NewRequest(http.MethodPost, "/quickbooks/webhook", bytes.NewBufferString("inbound"))
+	req := httptest.NewRequest(http.MethodPost, "/quickbooks/webhooks", bytes.NewBufferString("inbound"))
 	req.Header.Set("Content-Type", "application/cloudevents-batch+json")
 	req.Header.Set("X-Signature", "sig123")
 	req.Header.Set("Connection", "keep-alive") // hop-by-hop: must be dropped
@@ -94,7 +94,7 @@ func TestHandleWebhookRelayForwards(t *testing.T) {
 
 func TestHandleWebhookRelayErrors(t *testing.T) {
 	call := func(h *integrationHandler[testAccountFields, testPage, testWebhookParams, testWebhookReply, testWebhookHeaders, testWebhookNotification, testResourceParams, struct{}, struct{}], relay *relayStub, setup func(*http.Request)) int {
-		req := httptest.NewRequest(http.MethodPost, "/quickbooks/webhook", bytes.NewBufferString("body"))
+		req := httptest.NewRequest(http.MethodPost, "/quickbooks/webhooks", bytes.NewBufferString("body"))
 		if setup != nil {
 			setup(req)
 		}
@@ -168,7 +168,7 @@ func TestServerIPAllowlistExemptsRelay(t *testing.T) {
 		return res.Result().StatusCode
 	}
 
-	if code := call("/quickbooks/webhook"); code != http.StatusOK {
+	if code := call("/quickbooks/webhooks"); code != http.StatusOK {
 		t.Fatalf("relay path should be exempt from allowlist, got %d", code)
 	}
 	if code := call("/quickbooks/api/v1/synchronizer/data"); code != http.StatusForbidden {
