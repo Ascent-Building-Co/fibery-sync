@@ -483,7 +483,7 @@ type DataRequest[A, P any] struct {
 	// Always null in observation; how one is returned is unknown.
 	LastSynchronizationCheckpoint json.RawMessage `json:"lastSynchronizationCheckpoint,omitempty"`
 	CreatedAt                     time.Time       `json:"createdAt"`
-	Workspace                     any             `json:"workspace,omitempty"`
+	Workspace                     Workspace       `json:"workspace,omitempty"`
 	Pagination                    P               `json:"pagination,omitempty"`
 }
 
@@ -676,7 +676,7 @@ type WebhookInitRequest[A, P any] struct {
 	Types     []string         `json:"types"`
 	Account   Account[A]       `json:"account"`
 	Filter    map[string]any   `json:"filter"`
-	Workspace any              `json:"workspace,omitempty"`
+	Workspace Workspace        `json:"workspace,omitempty"`
 	Space     string           `json:"space,omitempty"`
 	UserID    string           `json:"userId,omitempty"`
 	Webhook   WebhookConfig[P] `json:"webhook"`
