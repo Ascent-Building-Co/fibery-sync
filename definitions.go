@@ -181,6 +181,11 @@ type ActionRequest[A any] struct {
 
 type ActionResponse struct {
 	Data any `json:"data,omitempty"`
+	// Message reaches the automation's later steps as
+	// args.steps[n].result.message, prefixed with the action's name and ": ".
+	// Fibery drops Data, so Message is how an action reports results a script
+	// can read.
+	Message string `json:"message,omitempty"`
 }
 
 // SyncConfig specifies available data types to be synced from the integration source, data syncronization filters,and webhook config if available.
